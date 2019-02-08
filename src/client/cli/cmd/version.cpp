@@ -16,8 +16,8 @@
  */
 
 #include "version.h"
-#include <multipass/version.h>
 #include <multipass/cli/argparser.h>
+#include <multipass/version.h>
 
 namespace mp = multipass;
 namespace cmd = multipass::cmd;
@@ -46,7 +46,10 @@ mp::ReturnCode cmd::Version::run(mp::ArgParser* parser)
     return dispatch(&RpcMethod::version, request, on_success, on_failure);
 }
 
-std::string cmd::Version::name() const { return "version"; }
+std::string cmd::Version::name() const
+{
+    return "version";
+}
 
 QString cmd::Version::short_help() const
 {

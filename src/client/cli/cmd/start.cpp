@@ -72,7 +72,10 @@ mp::ReturnCode cmd::Start::run(mp::ArgParser* parser)
     return dispatch(&RpcMethod::start, request, on_success, on_failure, streaming_callback);
 }
 
-std::string cmd::Start::name() const { return "start"; }
+std::string cmd::Start::name() const
+{
+    return "start";
+}
 
 QString cmd::Start::short_help() const
 {

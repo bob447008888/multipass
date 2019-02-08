@@ -21,7 +21,7 @@
 #include "stub_certprovider.h"
 
 #include <multipass/logging/log.h>
-#include <src/client/client.h>
+#include <src/client/cli/client.h>
 #include <src/daemon/daemon_rpc.h>
 
 #include <QEventLoop>
