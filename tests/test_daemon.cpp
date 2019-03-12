@@ -18,8 +18,10 @@
 #include <src/client/client.h>
 #include <src/daemon/daemon.h>
 #include <src/daemon/daemon_config.h>
+#include <src/daemon/daemon_rpc.h>
 
 #include <multipass/auto_join_thread.h>
+#include <multipass/cli/command.h>
 #include <multipass/name_generator.h>
 #include <multipass/version.h>
 #include <multipass/virtual_machine_factory.h>
@@ -44,6 +46,7 @@
 #include <QCoreApplication>
 
 #include <memory>
+#include <ostream>
 #include <sstream>
 #include <string>
 
@@ -56,6 +59,8 @@ namespace
 struct MockDaemon : public mp::Daemon
 {
     using mp::Daemon::Daemon;
+    MOCK_METHOD3(create,
+                 grpc::Status(grpc::ServerContext*, const mp::CreateRequest*, grpc::ServerWriter<mp::CreateReply>*));
     MOCK_METHOD3(launch,
                  grpc::Status(grpc::ServerContext*, const mp::LaunchRequest*, grpc::ServerWriter<mp::LaunchReply>*));
     MOCK_METHOD3(purge,
@@ -96,6 +101,57 @@ struct StubNameGenerator : public mp::NameGenerator
     }
     std::string name;
 };
+
+class TestCreate final : public mp::cmd::Command
+{
+public:
+    using Command::Command;
+    mp::ReturnCode run(mp::ArgParser* /*parser*/) override
+    {
+        auto on_success = [](mp::CreateReply& /*reply*/) { return mp::ReturnCode::Ok; };
+        auto on_failure = [](grpc::Status& /*status*/) { return mp::ReturnCode::CommandFail; };
+        auto streaming_callback = [this](mp::CreateReply& reply)
+        {
+            cout << reply.create_message() << std::endl;
+        };
+
+        return dispatch(&mp::Rpc::Stub::create, request, on_success, on_failure, streaming_callback);
+    }
+
+    std::string name() const override
+    {
+        return "test_create";
+    }
+
+    QString short_help() const override
+    {
+        return {};
+    }
+
+    QString description() const override
+    {
+        return {};
+    }
+
+private:
+    mp::ParseCode parse_args(mp::ArgParser* /*parser*/) override
+    {
+        return mp::ParseCode::Ok;
+    }
+
+    mp::CreateRequest request;
+};
+
+class TestClient : public mp::Client
+{
+public:
+    explicit TestClient(mp::ClientConfig& context) : mp::Client{context}
+    {
+        add_command<TestCreate>();
+        sort_commands();
+    }
+};
+
 } // namespace
 
 struct Daemon : public Test
@@ -146,7 +202,7 @@ struct Daemon : public Test
             mpt::StubTerminal term(cout, cerr, cin);
             mp::ClientConfig client_config{server_address, mp::RpcConnectionType::insecure,
                                            std::make_unique<mpt::StubCertProvider>(), &term};
-            mp::Client client{client_config};
+            TestClient client{client_config};
             for (const auto& command : commands)
             {
                 QStringList args = QStringList() << "multipass_test";
@@ -176,6 +232,7 @@ TEST_F(Daemon, receives_commands)
 {
     MockDaemon daemon{config_builder.build()};
 
+    EXPECT_CALL(daemon, create(_, _, _));
     EXPECT_CALL(daemon, launch(_, _, _));
     EXPECT_CALL(daemon, purge(_, _, _));
     EXPECT_CALL(daemon, find(_, _, _));
@@ -192,7 +249,8 @@ TEST_F(Daemon, receives_commands)
     EXPECT_CALL(daemon, mount(_, _, _));
     EXPECT_CALL(daemon, umount(_, _, _));
 
-    send_commands({{"launch", "foo"},
+    send_commands({{"test_create", "foo"},
+                   {"launch", "foo"},
                    {"delete", "foo"},
                    {"exec", "foo", "--", "cmd"},
                    {"info", "foo"},
@@ -209,33 +267,6 @@ TEST_F(Daemon, receives_commands)
                    {"umount", "instance"}});
 }
 
-TEST_F(Daemon, creates_virtual_machines)
-{
-    auto mock_factory = use_a_mock_vm_factory();
-    mp::Daemon daemon{config_builder.build()};
-
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
-    send_command({"launch"});
-}
-
-TEST_F(Daemon, on_creation_hooks_up_platform_prepare_source_image)
-{
-    auto mock_factory = use_a_mock_vm_factory();
-    mp::Daemon daemon{config_builder.build()};
-
-    EXPECT_CALL(*mock_factory, prepare_source_image(_));
-    send_command({"launch"});
-}
-
-TEST_F(Daemon, on_creation_hooks_up_platform_prepare_instance_image)
-{
-    auto mock_factory = use_a_mock_vm_factory();
-    mp::Daemon daemon{config_builder.build()};
-
-    EXPECT_CALL(*mock_factory, prepare_instance_image(_, _));
-    send_command({"launch"});
-}
-
 TEST_F(Daemon, provides_version)
 {
     mp::Daemon daemon{config_builder.build()};
@@ -246,7 +277,48 @@ TEST_F(Daemon, provides_version)
     EXPECT_THAT(stream.str(), HasSubstr(mp::version_string));
 }
 
-TEST_F(Daemon, generates_name_when_client_does_not_provide_one)
+namespace
+{
+struct DaemonCreateLaunchTestSuite : public Daemon, public WithParamInterface<std::string>
+{
+};
+
+struct MinSpaceRespectedSuite : public Daemon, public WithParamInterface<std::tuple<std::string, std::string>>
+{
+};
+
+struct MinSpaceViolatedSuite : public Daemon, public WithParamInterface<std::tuple<std::string, std::string>>
+{
+};
+
+TEST_P(DaemonCreateLaunchTestSuite, creates_virtual_machines)
+{
+    auto mock_factory = use_a_mock_vm_factory();
+    mp::Daemon daemon{config_builder.build()};
+
+    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _));
+    send_command({GetParam()});
+}
+
+TEST_P(DaemonCreateLaunchTestSuite, on_creation_hooks_up_platform_prepare_source_image)
+{
+    auto mock_factory = use_a_mock_vm_factory();
+    mp::Daemon daemon{config_builder.build()};
+
+    EXPECT_CALL(*mock_factory, prepare_source_image(_));
+    send_command({GetParam()});
+}
+
+TEST_P(DaemonCreateLaunchTestSuite, on_creation_hooks_up_platform_prepare_instance_image)
+{
+    auto mock_factory = use_a_mock_vm_factory();
+    mp::Daemon daemon{config_builder.build()};
+
+    EXPECT_CALL(*mock_factory, prepare_instance_image(_, _));
+    send_command({GetParam()});
+}
+
+TEST_P(DaemonCreateLaunchTestSuite, generates_name_on_creation_when_client_does_not_provide_one)
 {
     const std::string expected_name{"pied-piper-valley"};
 
@@ -254,7 +326,7 @@ TEST_F(Daemon, generates_name_when_client_does_not_provide_one)
     mp::Daemon daemon{config_builder.build()};
 
     std::stringstream stream;
-    send_command({"launch"}, stream);
+    send_command({GetParam()}, stream);
 
     EXPECT_THAT(stream.str(), HasSubstr(expected_name));
 }
@@ -340,7 +412,7 @@ MATCHER_P(YAMLNodeContainsSequence, key, "")
     return arg[key].IsSequence();
 }
 
-TEST_F(Daemon, default_cloud_init_grows_root_fs)
+TEST_P(DaemonCreateLaunchTestSuite, default_cloud_init_grows_root_fs)
 {
     auto mock_factory = use_a_mock_vm_factory();
     mp::Daemon daemon{config_builder.build()};
@@ -359,11 +431,9 @@ TEST_F(Daemon, default_cloud_init_grows_root_fs)
             }
         }));
 
-    send_command({"launch"});
+    send_command({GetParam()});
 }
 
-namespace
-{
 class DummyKeyProvider : public mpt::StubSSHKeyProvider
 {
 public:
@@ -378,9 +448,8 @@ public:
 private:
     std::string key;
 };
-} // namespace
 
-TEST_F(Daemon, adds_ssh_keys_to_cloud_init_config)
+TEST_P(DaemonCreateLaunchTestSuite, adds_ssh_keys_to_cloud_init_config)
 {
     auto mock_factory = use_a_mock_vm_factory();
     std::string expected_key{"thisitnotansshkeyactually"};
@@ -394,18 +463,8 @@ TEST_F(Daemon, adds_ssh_keys_to_cloud_init_config)
             EXPECT_THAT(ssh_keys_stanza, YAMLNodeContainsSubString(expected_key));
         }));
 
-    send_command({"launch"});
+    send_command({GetParam()});
 }
-
-namespace
-{
-struct MinSpaceRespectedSuite : public Daemon, public WithParamInterface<std::tuple<std::string, std::string>>
-{
-};
-
-struct MinSpaceViolatedSuite : public Daemon, public WithParamInterface<std::tuple<std::string, std::string>>
-{
-};
 
 TEST_P(MinSpaceRespectedSuite, accepts_launch_with_enough_explicit_memory)
 {
@@ -436,6 +495,7 @@ TEST_P(MinSpaceViolatedSuite, refuses_launch_with_memory_below_threshold)
                 AllOf(HasSubstr("fail"), AnyOf(HasSubstr("memory"), HasSubstr("disk")), HasSubstr("minimum")));
 }
 
+INSTANTIATE_TEST_SUITE_P(Daemon, DaemonCreateLaunchTestSuite, Values("launch", "test_create"));
 INSTANTIATE_TEST_SUITE_P(Daemon, MinSpaceRespectedSuite,
                          Combine(Values("--mem", "--disk"), Values("1024m", "2Gb", "987654321")));
 INSTANTIATE_TEST_SUITE_P(Daemon, MinSpaceViolatedSuite,
